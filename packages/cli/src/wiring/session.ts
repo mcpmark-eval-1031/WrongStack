@@ -50,6 +50,7 @@ export async function setupSession(params: {
     model: string;
     provider: string;
     tools?: { restrictToProjectRoot?: boolean | undefined } | undefined;
+    features?: { allowOutsideProjectRoot?: boolean | undefined };
   };
   wpaths: WstackPaths;
   projectRoot: string;
@@ -178,6 +179,7 @@ export async function setupSession(params: {
     agentId: 'leader',
     agentName: 'Leader Agent',
     traceId,
+    allowOutsideProjectRoot: config.features?.allowOutsideProjectRoot ?? true,
   });
   // Inject package-author-tracker options so the install tool can record authorship.
   context.meta['packageTrackerOpts'] = {

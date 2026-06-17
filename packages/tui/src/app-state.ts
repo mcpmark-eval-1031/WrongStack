@@ -271,6 +271,7 @@ export type State = {
     featureSkills: boolean;
     featureModelsRegistry: boolean;
     featureTokenSaving: boolean;
+    allowOutsideProjectRoot: boolean;
     // Context
     contextAutoCompact: boolean;
     contextStrategy: CompactorStrategy;
@@ -486,6 +487,42 @@ export type State = {
   /** True while the worktree monitor overlay is open (Ctrl+T). */
   worktreeMonitorOpen: boolean;
   /**
+   * AutonomousCoordinator state — live from `subscribeCoordinatorEvents`.
+   * Tracks project-level multi-session coordination: goals, tasks, consensus, and knowledge.
+   */
+  coordinator: {
+    /** Active coordination goals. */
+    goals: Array<{
+      id: string;
+      title: string;
+      status: 'active' | 'paused' | 'completed' | 'failed';
+      progress?: number | undefined;
+      /** DEPRECATED — use tasks instead */
+      steps?: string[] | undefined;
+      tasks: Array<{
+        id: string;
+        title: string;
+        status: 'pending' | 'running' | 'done' | 'failed';
+        assignedTo?: string | undefined;
+      }>;
+      /** Agents/sessions participating in this goal's coordination. */
+      participants: string[];
+    }>;
+    /** Live pending events for the coordinator panel timeline. */
+    timeline: Array<{
+      at: number;
+      kind: 'goal' | 'task' | 'knowledge' | 'consensus' | 'deadlock';
+      icon: string;
+      text: string;
+    }>;
+    /** Count of shared knowledge facts across all sessions. */
+    knowledgeCount: number;
+    /** True while the coordinator monitor overlay is open. */
+    monitorOpen: boolean;
+    /** Coordinator health: true when connected and processing events. */
+    healthy: boolean;
+  };
+  /**
    * In-app chat scroll state for the scrollable viewport.
    * In the default `<Static>` path these are inert.
    *   scrollOffset    — rows scrolled up from the bottom; 0 = pinned to newest.
@@ -535,6 +572,8 @@ export type Settings = {
   featureModelsRegistry: boolean;
   /** Token-saving mode: omits non-essential tools and trims system prompt. */
   featureTokenSaving: boolean;
+  /** Allow tools to access paths outside the project root. Default: true (open). */
+  allowOutsideProjectRoot: boolean;
   contextAutoCompact: boolean;
   contextStrategy: 'hybrid' | 'intelligent' | 'selective';
   logLevel: 'error' | 'warn' | 'info' | 'debug' | 'trace';
@@ -638,6 +677,7 @@ export type Action =
       featureSkills: boolean;
       featureModelsRegistry: boolean;
       featureTokenSaving: boolean;
+      allowOutsideProjectRoot: boolean;
       contextAutoCompact: boolean;
       contextStrategy: CompactorStrategy;
       logLevel: LogLevel;
@@ -874,4 +914,20 @@ export type Action =
   /** Auto-proceed countdown tick. Upserts the countdown; 0 clears it. */
   | { type: 'countdownTick'; remainingSeconds: number }
   /** Auto-proceed countdown ended (completed or aborted). */
-  | { type: 'countdownEnded' };
+  | { type: 'countdownEnded' }
+  // --- AutonomousCoordinator ---
+  /** Coordinator emitted a live event. */
+  | {
+      type: 'coordinatorEvent';
+      event: {
+        type: string;
+        goalId?: string | undefined;
+        taskId?: string | undefined;
+        knowledgeId?: string | undefined;
+        title?: string | undefined;
+        text?: string | undefined;
+        participants?: string[] | undefined;
+      };
+    }
+  /** Toggle the coordinator monitor overlay. */
+  | { type: 'toggleCoordinatorMonitor' };

@@ -6,6 +6,7 @@ import type {
   Agent,
   AttachmentStore,
   ContentBlock,
+  CoordinatorEvent,
   Director,
   EventBus,
   Message,
@@ -54,6 +55,7 @@ import { ProjectPicker } from './components/project-picker.js';
 import { QueuePanel } from './components/queue-panel.js';
 import { ProcessListMonitor } from './components/process-list.js';
 import { GoalPanel } from './components/goal-panel.js';
+import { CoordinatorPanel } from './components/coordinator-panel.js';
 import { ResumePicker } from './components/resume-picker.js';
 import { SessionsPanel } from './components/sessions-panel.js';
 import { SettingsPicker } from './components/settings-picker.js';
@@ -73,6 +75,7 @@ import { WorktreePanel } from './components/worktree-panel.js';
 import { searchFiles } from './file-search.js';
 import { type GitInfo, readGitInfo } from './git-info.js';
 import { useDirectorFleetBridge } from './hooks/use-director-fleet-bridge.js';
+import { useAutonomousCoordinator } from './hooks/use-autonomous-coordinator.js';
 import { useStatuslineState } from './hooks/use-statusline-state.js';
 import { useTuiControllers } from './hooks/use-tui-controllers.js';
 import { useTuiEventBridge } from './hooks/use-tui-event-bridge.js';
@@ -570,6 +573,14 @@ export interface AppProps {
    * Used by the `wrongstack quick` command to show agents panel immediately.
    */
   initialAgentsMonitorOpen?: boolean | undefined;
+
+  // --- AutonomousCoordinator (project-level multi-session coordination) ---
+
+  /**
+   * Subscribe to live events from the AutonomousCoordinator. Returns an unsubscribe
+   * function. TUI uses this to drive the coordinator panel live view.
+   */
+  subscribeCoordinatorEvents?: ((fn: (event: CoordinatorEvent) => void) => (() => void)) | undefined;
 }
 
 const PASTE_THRESHOLD_CHARS = 200;
@@ -658,6 +669,7 @@ export function App({
   getLiveSessions,
   onSwitchToSession,
   initialAgentsMonitorOpen,
+  subscribeCoordinatorEvents,
 }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -824,7 +836,7 @@ export function App({
     },
     autonomyPicker: { open: false, options: [], selected: 0 },
     resumePicker: { open: false, sessions: [], selected: 0, busy: false, hint: undefined, error: undefined },
-    settingsPicker: { open: false, field: 0, mode: 'off', delayMs: 0, titleAnimation: true, yolo: false, streamFleet: true, chime: false, confirmExit: true, nextPrediction: false, featureMcp: true, featurePlugins: true, featureMemory: true, featureSkills: true, featureModelsRegistry: true, featureTokenSaving: false, contextAutoCompact: true, contextStrategy: 'hybrid', logLevel: 'info', auditLevel: 'standard', indexOnStart: true, maxIterations: 500, autoProceedMaxIterations: 50, enhanceDelayMs: 60_000, enhanceEnabled: true, enhanceLanguage: 'original', debugStream: false, configScope: 'global', restrictFsToRoot: false },
+    settingsPicker: { open: false, field: 0, mode: 'off', delayMs: 0, titleAnimation: true, yolo: false, streamFleet: true, chime: false, confirmExit: true, nextPrediction: false, featureMcp: true, featurePlugins: true, featureMemory: true, featureSkills: true, featureModelsRegistry: true, featureTokenSaving: false, allowOutsideProjectRoot: true, restrictFsToRoot: false, contextAutoCompact: true, contextStrategy: 'hybrid', logLevel: 'info', auditLevel: 'standard', indexOnStart: true, maxIterations: 500, autoProceedMaxIterations: 50, enhanceDelayMs: 60_000, enhanceEnabled: true, enhanceLanguage: 'original', debugStream: false, configScope: 'global' },
     projectPicker: { open: false, allItems: [], items: [], selected: 0, filter: '', hint: undefined },
     confirmQueue: [],
     enhance: null,
@@ -864,6 +876,13 @@ export function App({
     autoPhase: null,
     worktrees: {},
     worktreeMonitorOpen: false,
+    coordinator: {
+      goals: [],
+      timeline: [],
+      knowledgeCount: 0,
+      monitorOpen: false,
+      healthy: false,
+    },
     scrollOffset: 0,
     totalLines: 0,
     viewportRows: 0,
@@ -871,6 +890,11 @@ export function App({
     debugStreamStats: null,
     countdown: null,
   });
+
+  // ── AutonomousCoordinator bridge ─────────────────────────────────────
+  // Wire project-level coordinator events into the TUI reducer so the
+  // CoordinatorPanel can render live goals, tasks, and knowledge.
+  useAutonomousCoordinator(subscribeCoordinatorEvents, dispatch);
 
   const builderRef = useRef<InputBuilder | null>(null);
   if (builderRef.current === null) {
@@ -1632,6 +1656,7 @@ export function App({
       state.settingsPicker.open ||
       state.enhanceBusy ||
       state.enhance != null ||
+      state.coordinator.monitorOpen ||
       state.escConfirm != null ||
       state.confirmQueue.length > 0;
     const overlayClosed = prevAnyOverlayOpen.current && !anyOpenNow;
@@ -1652,6 +1677,7 @@ export function App({
     state.settingsPicker.open,
     state.enhanceBusy,
     state.enhance,
+    state.coordinator.monitorOpen,
     state.escConfirm,
     state.confirmQueue.length,
     state.entries.length,
@@ -1680,6 +1706,7 @@ export function App({
     processList: boolean;
     goalPanel: boolean;
     sessionsPanel: boolean;
+    coordinator: boolean;
   } | null>(null);
   const resizeRestoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
@@ -1704,6 +1731,7 @@ export function App({
         processList: stateRef.current.processListOpen,
         goalPanel: stateRef.current.goalPanelOpen,
         sessionsPanel: stateRef.current.sessionsPanelOpen,
+        coordinator: stateRef.current.coordinator.monitorOpen,
       };
 
       // Close all open panels so the live region shrinks to input+statusbar.
@@ -1755,6 +1783,7 @@ export function App({
             featureSkills: sp.featureSkills,
             featureModelsRegistry: sp.featureModelsRegistry,
             featureTokenSaving: sp.featureTokenSaving,
+            allowOutsideProjectRoot: sp.allowOutsideProjectRoot,
             contextAutoCompact: sp.contextAutoCompact,
             contextStrategy: sp.contextStrategy,
             logLevel: sp.logLevel,
@@ -1783,6 +1812,7 @@ export function App({
         if (prev.processList) dispatch({ type: 'toggleProcessList' });
         if (prev.goalPanel) dispatch({ type: 'toggleGoalPanel' });
         if (prev.sessionsPanel) dispatch({ type: 'toggleSessionsPanel' });
+        if (prev.coordinator) dispatch({ type: 'toggleCoordinatorMonitor' });
         preResizePanelsRef.current = null;
         resizeRestoreTimerRef.current = null;
       }, 300);
@@ -2292,6 +2322,7 @@ export function App({
       featureSkills: s.featureSkills ?? true,
       featureModelsRegistry: s.featureModelsRegistry ?? true,
       featureTokenSaving: s.featureTokenSaving ?? false,
+      allowOutsideProjectRoot: s.allowOutsideProjectRoot ?? true,
       contextAutoCompact: s.contextAutoCompact ?? true,
       contextStrategy: s.contextStrategy ?? 'hybrid',
       logLevel: s.logLevel ?? 'info',
@@ -2500,6 +2531,7 @@ export function App({
       featureSkills: sp.featureSkills,
       featureModelsRegistry: sp.featureModelsRegistry,
       featureTokenSaving: sp.featureTokenSaving,
+      allowOutsideProjectRoot: sp.allowOutsideProjectRoot,
       contextAutoCompact: sp.contextAutoCompact,
       contextStrategy: sp.contextStrategy,
       logLevel: sp.logLevel,
@@ -2531,6 +2563,8 @@ export function App({
     state.settingsPicker.featureMemory,
     state.settingsPicker.featureSkills,
     state.settingsPicker.featureModelsRegistry,
+    state.settingsPicker.featureTokenSaving,
+    state.settingsPicker.allowOutsideProjectRoot,
     state.settingsPicker.contextAutoCompact,
     state.settingsPicker.contextStrategy,
     state.settingsPicker.logLevel,
@@ -2539,6 +2573,9 @@ export function App({
     state.settingsPicker.maxIterations,
     state.settingsPicker.autoProceedMaxIterations,
     state.settingsPicker.enhanceDelayMs,
+    state.settingsPicker.enhanceEnabled,
+    state.settingsPicker.enhanceLanguage,
+    state.settingsPicker.debugStream,
     saveSettings,
   ]);
 
@@ -4093,6 +4130,12 @@ export function App({
       }
       return;
     }
+    // F11 → AutonomousCoordinator monitor. Opens the project-level coordination panel
+    // showing live goals, tasks, knowledge, and consensus across all sessions.
+    if (key.fn === 11 || (input === '\x1b' && state.coordinator.monitorOpen)) {
+      dispatch({ type: 'toggleCoordinatorMonitor' });
+      return;
+    }
     // Ctrl+S toggles the autonomy settings editor (also openable via
     // F5 and `/settings`). Opening closes any other overlay or panel.
     if (key.ctrl && input === 's') {
@@ -4124,6 +4167,7 @@ export function App({
           featureSkills: cfg.featureSkills ?? true,
           featureModelsRegistry: cfg.featureModelsRegistry ?? true,
           featureTokenSaving: cfg.featureTokenSaving ?? false,
+          allowOutsideProjectRoot: cfg.allowOutsideProjectRoot ?? true,
           contextAutoCompact: cfg.contextAutoCompact ?? true,
           contextStrategy: cfg.contextStrategy ?? 'hybrid',
           logLevel: cfg.logLevel ?? 'info',
@@ -4185,6 +4229,10 @@ export function App({
       }
       if (state.sessionsPanelOpen) {
         dispatch({ type: 'toggleSessionsPanel' });
+        return;
+      }
+      if (state.coordinator.monitorOpen) {
+        dispatch({ type: 'toggleCoordinatorMonitor' });
         return;
       }
     }
@@ -4397,6 +4445,7 @@ export function App({
       state.processListOpen ||
       state.goalPanelOpen ||
       state.sessionsPanelOpen ||
+      state.coordinator.monitorOpen ||
       state.helpOpen ||
       (state.autoPhase?.monitorOpen ?? false) ||
       state.rewindOverlay !== null;
@@ -5527,6 +5576,7 @@ export function App({
               featureSkills={state.settingsPicker.featureSkills}
               featureModelsRegistry={state.settingsPicker.featureModelsRegistry}
               featureTokenSaving={state.settingsPicker.featureTokenSaving}
+              allowOutsideProjectRoot={state.settingsPicker.allowOutsideProjectRoot}
               contextAutoCompact={state.settingsPicker.contextAutoCompact}
               contextStrategy={state.settingsPicker.contextStrategy}
               logLevel={state.settingsPicker.logLevel}
@@ -5558,6 +5608,13 @@ export function App({
               selected={state.sessionsPanel.selected}
               resumeConfirm={state.sessionResumeConfirm ? { sessionName: state.sessionResumeConfirm.sessionName } : undefined}
               currentSessionId={agent.ctx.session?.id}
+            />
+          ) : null}
+          {state.coordinator.monitorOpen ? (
+            <CoordinatorPanel
+              coordinator={state.coordinator}
+              nowTick={nowTick}
+              onClose={() => dispatch({ type: 'toggleCoordinatorMonitor' })}
             />
           ) : null}
           {state.rewindOverlay

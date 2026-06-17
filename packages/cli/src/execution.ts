@@ -5,14 +5,17 @@
  */
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type {
+import {
   Agent,
   AttachmentStore,
+  AutonomousCoordinator,
+  CoordinatorEvent,
   ChimeraReviewNeededPayload,
   Config,
   ConfigStore,
   Director,
   EventBus,
+  GlobalMailbox,
   MemoryStore,
   ModelsRegistry,
   ModeStore,
@@ -73,6 +76,7 @@ export interface LiveSettingsInput {
   featureSkills?: boolean | undefined;
   featureModelsRegistry?: boolean | undefined;
   featureTokenSaving?: boolean | undefined;
+  allowOutsideProjectRoot?: boolean | undefined;
   contextAutoCompact?: boolean | undefined;
   contextStrategy?: string | undefined;
   logLevel?: string | undefined;
@@ -113,6 +117,12 @@ export interface ExecutionDeps {
   effectiveMaxContext: number;
   queueStore: import('@wrongstack/core').QueueStore;
   context: import('@wrongstack/core').Context;
+  /**
+   * Project-scoped mailbox (mailbox-bus) that lives across all sessions
+   * for this project. The AutonomousCoordinator subscribes to it so
+   * goals/tasks/knowledge are visible to every terminal in the project.
+   */
+  mailbox: GlobalMailbox;
   stats: SessionStats;
   detachTodosCheckpoint?: (() => void | Promise<void>) | undefined;
   savedProviderCfg: ProviderConfig | undefined;
@@ -290,6 +300,7 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
     effectiveMaxContext,
     queueStore,
     context,
+    mailbox,
     stats,
     detachTodosCheckpoint,
     savedProviderCfg,
@@ -697,6 +708,94 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
         resumeSessionId?: string | undefined;
       } | null = null;
 
+      // ── AutonomousCoordinator: project-level multi-session coordination ─────────
+      // The coordinator tracks goals, tasks, knowledge, and consensus across all
+      // active sessions in the same project. Initialized lazily when the Director
+      // becomes available so we have access to director.fleet for cross-session events.
+      const coordinatorEvents = new Set<(event: CoordinatorEvent) => void>();
+      let autonomousCoordinator: AutonomousCoordinator | null = null;
+
+      const onDirectorReady = (dir: Director) => {
+        if (autonomousCoordinator) return;
+        // Resolve the session dir from the transcript path (e.g.
+        // "~/.wrongstack/.../sessions/<id>.jsonl" → parent dir). Fall back
+        // to the global project dir when the writer is in-memory.
+        const transcript = context.session.transcriptPath;
+        const sessionDir = transcript
+          ? path.dirname(transcript)
+          : wpaths.projectDir;
+        // Adapt Context.provider (Wire provider) to AutonomousBrain.LLMProvider
+        // (one-method LLM call). The brain calls decide(prompt) → option+rationale.
+        const llmProvider: import('@wrongstack/core').LLMProvider = {
+          decide: async (prompt) => {
+            const sysPrompt = [
+              {
+                type: 'text' as const,
+                text: 'You are the autonomous brain of a multi-agent coordination system. '
+                  + 'Pick the best option for the decision described and reply with JSON: '
+                  + '{"optionId":"<id>","rationale":"<short why>"}.',
+              },
+            ];
+            const userPrompt = {
+              type: 'text' as const,
+              text: `Decision: ${prompt.question}\n\n`
+                + `Context: ${prompt.context}\n\n`
+                + `Options:\n${prompt.options
+                  .map((o, i) => `  ${i + 1}. [${o.id}] ${o.label}${o.consequence ? ` — ${o.consequence}` : ''}`)
+                  .join('\n')}\n\n`
+                + `Risk: ${prompt.risk}\n\n`
+                + 'Reply with ONLY the JSON object.',
+            };
+            const resp = await context.provider.complete(
+              {
+                model: context.model,
+                system: sysPrompt,
+                messages: [
+                  {
+                    role: 'user',
+                    content: [userPrompt],
+                  },
+                ],
+                maxTokens: 1024,
+                temperature: 0,
+              },
+              { signal: context.signal },
+            );
+            const text = resp.content
+              .filter((b): b is { type: 'text'; text: string } => (b as { type?: string }).type === 'text')
+              .map((b) => b.text)
+              .join('\n')
+              .trim();
+            // Parse the JSON, tolerate code fences.
+            const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+            try {
+              const parsed = JSON.parse(cleaned) as { optionId?: string; rationale?: string };
+              const optId = parsed.optionId ?? prompt.options[0]?.id ?? '';
+              return { optionId: optId, rationale: parsed.rationale ?? '' };
+            } catch {
+              // Fallback: pick the first option.
+              return { optionId: prompt.options[0]?.id ?? '', rationale: text };
+            }
+          },
+        };
+        autonomousCoordinator = new AutonomousCoordinator({
+          sessionDir,
+          fleet: dir.fleet,
+          mailbox: mailbox as unknown as import('@wrongstack/core').Mailbox,
+          selfAgentId: `leader@${context.session.id ?? 'unknown'}`,
+          selfAgentName: 'Leader',
+          llmProvider,
+        });
+      };
+
+      // Hook into Director lifecycle: Director is created lazily on first subagent.spawned.
+      // If it already exists, wire immediately; otherwise wait for the spawn event.
+      if (director) onDirectorReady(director);
+      const offDirectorSpawned = events.onPattern('subagent.spawned', () => {
+        const dir = director;
+        if (dir) { offDirectorSpawned(); onDirectorReady(dir); }
+      });
+
       try {
         code = await runTui({
           agent,
@@ -782,6 +881,7 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
               featureSkills: cfg.features?.skills !== false,
               featureModelsRegistry: cfg.features?.modelsRegistry !== false,
               featureTokenSaving: cfg.features?.tokenSavingMode ?? false,
+              allowOutsideProjectRoot: cfg.features?.allowOutsideProjectRoot ?? true,
               contextAutoCompact: cfg.context?.autoCompact !== false,
               contextStrategy: cfg.context?.strategy ?? 'hybrid',
               logLevel: cfg.log?.level ?? 'info',
@@ -854,6 +954,8 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
                 s.featureMemory !== undefined ||
                 s.featureSkills !== undefined ||
                 s.featureModelsRegistry !== undefined ||
+                s.featureTokenSaving !== undefined ||
+                s.allowOutsideProjectRoot !== undefined ||
                 s.contextAutoCompact !== undefined ||
                 s.contextStrategy !== undefined ||
                 s.logLevel !== undefined ||
@@ -899,7 +1001,8 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
                   s.featureMemory !== undefined ||
                   s.featureSkills !== undefined ||
                   s.featureModelsRegistry !== undefined ||
-                  s.featureTokenSaving !== undefined
+                  s.featureTokenSaving !== undefined ||
+                s.allowOutsideProjectRoot !== undefined
                 ) {
                   const feats = (decrypted.features as Record<string, unknown>) ?? {};
                   if (s.featureMcp !== undefined) feats.mcp = s.featureMcp;
@@ -910,6 +1013,8 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
                     feats.modelsRegistry = s.featureModelsRegistry;
                   if (s.featureTokenSaving !== undefined)
                     feats.tokenSavingMode = s.featureTokenSaving;
+                  if (s.allowOutsideProjectRoot !== undefined)
+                    feats.allowOutsideProjectRoot = s.allowOutsideProjectRoot;
                   decrypted.features = feats;
                 }
                 if (s.contextAutoCompact !== undefined || s.contextStrategy !== undefined) {
@@ -1070,6 +1175,15 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
             ] as boolean) ?? true,
           director,
           fleetRoster,
+          // ── AutonomousCoordinator: project-level multi-session coordination ─────────
+          // The coordinator tracks goals, tasks, knowledge, and consensus across all
+          // active sessions in the same project. It runs independently of the leader
+          // agent and is accessible to any session in the project via the GlobalMailbox.
+          getAutonomousCoordinator: () => autonomousCoordinator,
+          subscribeCoordinatorEvents: (fn: (event: CoordinatorEvent) => void) => {
+            coordinatorEvents.add(fn);
+            return () => { coordinatorEvents.delete(fn); };
+          },
           // /clear: signal the TUI to wipe entries and reset fleet/leader stats
           // AND bump the context chip version — so the display reflects a
           // completely fresh session after the backend has been cleared.
@@ -1186,7 +1300,7 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
             const metaMode = context.meta?.['mode'];
             return typeof metaMode === 'string' ? metaMode : (modeId ?? 'default');
           },
-          registerDebugStreamCallback: async (cb) => {
+          registerDebugStreamCallback: async (cb: import('@wrongstack/providers').DebugStreamCallback) => {
             // Swap the debug-stream callback from stderr → TUI reducer.
             // Restored on TUI unmount via the cleanup in app.tsx.
             try {
@@ -1558,6 +1672,8 @@ export async function execute(deps: ExecutionDeps): Promise<number> {
         }
       } finally {
         renderer.setSilent(false);
+        // Cleanup: stop Director lifecycle listener so the coordinator no-op guard fires.
+        offDirectorSpawned();
       }
     } else if (flags.webui) {
       // Route permission confirmations to the browser (tool.confirm_needed
