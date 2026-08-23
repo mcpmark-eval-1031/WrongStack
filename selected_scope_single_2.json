@@ -1,0 +1,60 @@
+{
+  "description": "Finalized subset of the reviewed identifier target set that is safe to apply live (resolved canonical values verified against a live redirect). The eval-harness target_set.csv artifact from PR #88 was deliberately excluded during review and is NOT part of the live-applyable scope.",
+  "source_pr": {
+    "repo": "WrongStack/WrongStack",
+    "number": 88,
+    "title": "review: separate identifier from canonicalized identifier in agent catalog",
+    "author": "bugmaker00",
+    "state": "closed",
+    "not_merged_reason": "target_set.csv is an eval-harness artifact that does not belong in the project root"
+  },
+  "review_comment": {
+    "author": "ersinkoc",
+    "association": "COLLABORATOR",
+    "verification": "All-Hands-AI/OpenHands returns 301 -> OpenHands/OpenHands"
+  },
+  "applied_live_in_pr": {
+    "number": 102,
+    "title": "fix(acp): canonical OpenHands docs URL (supersedes #88, no stray CSV)",
+    "author": "ersinkoc",
+    "merged_commit_sha": "5df5a4edaea6684516bde22c114fea44859cadcc",
+    "merged_at": "2026-06-23T11:46:19Z"
+  },
+  "counts": {
+    "reviewed_total": 4,
+    "selected_safe_to_apply_live": 1,
+    "excluded": 3
+  },
+  "selected": [
+    {
+      "source_identifier": "All-Hands-AI/OpenHands",
+      "canonical_identifier": "OpenHands/OpenHands",
+      "agent_id": "openhands",
+      "live_verification": "301 -> 200",
+      "safe_to_apply_live": true,
+      "application": {
+        "file": "packages/acp/src/registry/agents.catalog.ts",
+        "field": "agents.openhands.docs",
+        "old": "https://github.com/All-Hands-AI/OpenHands",
+        "new": "https://github.com/OpenHands/OpenHands"
+      }
+    }
+  ],
+  "excluded_from_live_apply": [
+    {
+      "source_identifier": "openai/codex",
+      "canonical_identifier": "openai/codex",
+      "reason": "identity (source == canonical): produces no live change and live redirect not separately verified"
+    },
+    {
+      "source_identifier": "google-gemini/gemini-cli",
+      "canonical_identifier": "google-gemini/gemini-cli",
+      "reason": "identity (source == canonical): produces no live change and live redirect not separately verified"
+    },
+    {
+      "source_identifier": "QwenLM/Qwen3-Coder",
+      "canonical_identifier": "QwenLM/Qwen3-Coder",
+      "reason": "identity (source == canonical): produces no live change and live redirect not separately verified"
+    }
+  ]
+}

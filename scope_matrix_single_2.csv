@@ -1,0 +1,5 @@
+source_identifier,canonical_identifier,verified_live_redirect,resolution
+openai/codex,openai/codex,no,identity (source == canonical)
+google-gemini/gemini-cli,google-gemini/gemini-cli,no,identity (source == canonical)
+QwenLM/Qwen3-Coder,QwenLM/Qwen3-Coder,no,identity (source == canonical)
+All-Hands-AI/OpenHands,OpenHands/OpenHands,yes,301 -> 200 canonicalizes via redirect
